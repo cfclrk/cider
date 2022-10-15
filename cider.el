@@ -251,8 +251,35 @@ By default we favor the project-specific shadow-cljs over the system-wide."
   :safe #'stringp
   :package-version '(cider . "1.6.0"))
 
-(defcustom cider-jack-in-default
-  (if (executable-find "clojure") 'clojure-cli 'lein)
+(defcustom cider-bazel-command
+  "bazel"
+  "Command to execute Bazel."
+  :type 'string
+  :safe #'stringp
+  :package-version '(cider . "1.6.0"))
+
+(defcustom cider-bazel-global-options
+  nil
+  "Command line options used to execute Bazel."
+  :type 'string
+  :safe #'stringp
+  :package-version '(cider . "1.6.0"))
+
+(defcustom cider-bazel-parameters
+  "run"
+  "Params passed to bazel to start an nREPL server via `cider-jack-in'."
+  :type 'string
+  :safe #'stringp
+  :package-version '(cider . "1.6.0"))
+
+(defcustom cider-bazel-target
+  ""
+  "The bazel target to run to start an nREPL server via `cider-jack-in'."
+  :type 'string
+  :safe #'stringp
+  :package-version '(cider . "1.6.0"))
+
+(defcustom cider-jack-in-default (if (executable-find "clojure") 'clojure-cli 'lein)
   "The default tool to use when doing `cider-jack-in' outside a project.
 This value will only be consulted when no identifying file types, i.e.
 project.clj for leiningen or build.boot for boot, could be found.
@@ -362,6 +389,7 @@ Sub-match 1 must be the project path.")
     ('shadow-cljs cider-shadow-cljs-command)
     ('gradle      cider-gradle-command)
     ('nbb         cider-nbb-command)
+    ('bazel       cider-bazel-command)
     (_            (user-error "Unsupported project type `%S'" project-type))))
 
 (defun cider-jack-in-resolve-command (project-type)
@@ -383,6 +411,7 @@ Throws an error if PROJECT-TYPE is unknown."
     ;; the exec-path
     ('gradle (cider--resolve-project-command cider-gradle-command))
     ('nbb (cider--resolve-command cider-nbb-command))
+    ('bazel (cider--resolve-project-command cider-bazel-command))
     (_ (user-error "Unsupported project type `%S'" project-type))))
 
 (defun cider-jack-in-global-options (project-type)
@@ -395,6 +424,7 @@ Throws an error if PROJECT-TYPE is unknown."
     ('shadow-cljs cider-shadow-cljs-global-options)
     ('gradle      cider-gradle-global-options)
     ('nbb         cider-nbb-global-options)
+    ('bazel       cider-bazel-global-options)
     (_            (user-error "Unsupported project type `%S'" project-type))))
 
 (defun cider-jack-in-params (project-type)
@@ -411,6 +441,7 @@ Throws an error if PROJECT-TYPE is unknown."
     ('shadow-cljs cider-shadow-cljs-parameters)
     ('gradle      cider-gradle-parameters)
     ('nbb         cider-nbb-parameters)
+    ('bazel       (concat cider-bazel-parameters " " cider-bazel-target))
     (_            (user-error "Unsupported project type `%S'" project-type))))
 
 
@@ -798,6 +829,10 @@ dependencies."
            global-opts
            (unless (seq-empty-p global-opts) " ")
            params))
+    ('bazel (concat
+             global-opts
+             (unless (seq-empty-p global-opts) " ")
+             params))
     (_ (error "Unsupported project type `%S'" project-type))))
 
 
@@ -1718,7 +1753,8 @@ PROJECT-DIR defaults to current project."
                         (shadow-cljs . "shadow-cljs.edn")
                         (gradle      . "build.gradle")
                         (gradle      . "build.gradle.kts")
-                        (nbb         . "nbb.edn"))))
+                        (nbb         . "nbb.edn")
+                        (bazel       . "WORKSPACE"))))
     (delq nil
           (mapcar (lambda (candidate)
                     (when (file-exists-p (cdr candidate))
