@@ -5,11 +5,12 @@
 ### New features
 
 - [#3249](https://github.com/clojure-emacs/cider/pull/3249): Add support for Clojure Spec 2.
-- [#3247](https://github.com/clojure-emacs/cider/pull/3247) Add the `cider-stacktrace-analyze-at-point` and `cider-stacktrace-analyze-in-region` commands to view printed exceptions in the stacktrace inspector.
+- [#3247](https://github.com/clojure-emacs/cider/pull/3247): Add the `cider-stacktrace-analyze-at-point` and `cider-stacktrace-analyze-in-region` commands to view printed exceptions in the stacktrace inspector.
 
 ### Changes
 
 - Bump the injected nREPL version to 1.0.
+- [#3281](https://github.com/clojure-emacs/cider/pull/3281): Replace newline chars with actual newlines in `*cider-test-report*` buffer, for prettier error messages.
 
 ### Bugs fixed
 
