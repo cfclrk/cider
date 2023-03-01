@@ -1,7 +1,7 @@
 ;;; cider.el --- Clojure Interactive Development Environment that Rocks -*- lexical-binding: t -*-
 
 ;; Copyright © 2012-2013 Tim King, Phil Hagelberg, Bozhidar Batsov
-;; Copyright © 2013-2022 Bozhidar Batsov, Artur Malabarba and CIDER contributors
+;; Copyright © 2013-2023 Bozhidar Batsov, Artur Malabarba and CIDER contributors
 ;;
 ;; Author: Tim King <kingtim@gmail.com>
 ;;         Phil Hagelberg <technomancy@gmail.com>
@@ -11,7 +11,7 @@
 ;;         Steve Purcell <steve@sanityinc.com>
 ;; Maintainer: Bozhidar Batsov <bozhidar@batsov.dev>
 ;; URL: http://www.github.com/clojure-emacs/cider
-;; Version: 1.6.0
+;; Version: 1.7.0-snapshot
 ;; Package-Requires: ((emacs "26") (clojure-mode "5.16.0") (parseedn "1.0.6") (queue "0.2") (spinner "1.7") (seq "2.22") (sesman "0.3.2"))
 ;; Keywords: languages, clojure, cider
 
@@ -86,13 +86,14 @@
 (require 'cider-debug)
 (require 'cider-util)
 
+(require 'cl-lib)
 (require 'tramp-sh)
 (require 'subr-x)
 (require 'seq)
 (require 'sesman)
 (require 'package)
 
-(defconst cider-version "1.6.0"
+(defconst cider-version "1.7.0-snapshot"
   "The current version of CIDER.")
 
 (defconst cider-codename "Buenos Aires"
@@ -373,6 +374,26 @@ Sub-match 1 must be the project path.")
 (defvar cider-host-history nil
   "Completion history for connection hosts.")
 
+(defvar cider-jack-in-universal-options
+  '((clojure-cli (:prefix-arg 1 :cmd (:jack-in-type clj  :project-type clojure-cli :edit-project-dir t)))
+    (lein        (:prefix-arg 2 :cmd (:jack-in-type clj  :project-type lein :edit-project-dir t)))
+    (babashka    (:prefix-arg 3 :cmd (:jack-in-type clj  :project-type babashka :edit-project-dir t)))
+    (nbb         (:prefix-arg 4 :cmd (:jack-in-type cljs :project-type nbb :cljs-repl-type nbb :edit-project-dir t))))
+  "The list of project tools that are supported by the universal jack in command.
+
+Each item in the list consists of the tool name and its plist options.
+
+The plist supports the following keys
+
+- :prefix-arg the numerical prefix arg to use to jack in to the tool.
+
+- :cmd a plist of instructions how to invoke the jack in command, with keys
+
+  - :jack-in-type 'clj to start a clj repl and 'cljs for a cljs repl.
+
+  - &rest the same set of params supported by the `cider-jack-in-clj' and
+    `cider-jack-in-cljs' commands.")
+
 ;;;###autoload
 (defun cider-version ()
   "Display CIDER's version."
@@ -405,7 +426,7 @@ Throws an error if PROJECT-TYPE is unknown."
     ('shadow-cljs (let ((parts (split-string cider-shadow-cljs-command)))
                     (when-let* ((command (cider--resolve-command (car parts))))
                       (mapconcat #'identity (cons command (cdr parts)) " "))))
-    ;; TODO: Address the duplicated code bellow.
+    ;; TODO: Address the duplicated code below.
     ;; here we have to account for the possibility that the command is either
     ;; "nbb" (default) or "npx nbb".
     ('nbb (let ((parts (split-string cider-nbb-command)))
@@ -485,7 +506,7 @@ the artifact.")
 (defconst cider-latest-clojure-version "1.10.1"
   "Latest supported version of Clojure.")
 
-(defconst cider-required-middleware-version "0.29.0"
+(defconst cider-required-middleware-version "0.30.0"
   "The CIDER nREPL version that's known to work properly with CIDER.")
 
 (defcustom cider-injected-middleware-version cider-required-middleware-version
@@ -520,6 +541,19 @@ specifying the artifact ID, and the second element the version number."
                  (list :tag "Artifact ID and Version"
                        (string :tag "Artifact ID")
                        (string :tag "Version"))))
+
+(defvar-local cider-jack-in-cmd nil
+  "The custom command used to start a nrepl server.
+This is used by `cider-jack-in`.
+
+If this variable is set, its value will be
+used as the command to start the nrepl server
+instead of the default command inferred from
+the project type.
+
+This allows for fine-grained control over the jack-in process.
+The value should be a string representing the command to start
+the nrepl server, such as \"nbb nrepl-server\".")
 
 (defvar cider-jack-in-lein-plugins nil
   "List of Leiningen plugins to be injected at jack-in.
@@ -740,7 +774,15 @@ one used."
                      ;; `java.lang.IllegalArgumentException: Duplicate key [...]`:
                      (cider--dedupe-deps)
                      (seq-map (lambda (dep)
-                                (format "%s {:mvn/version \"%s\"}" (car dep) (cadr dep))))))
+                                (if (listp (cadr dep))
+                                    (format "%s {%s}"
+                                            (car dep)
+                                            (seq-reduce
+                                             (lambda (acc v)
+                                               (concat acc (format " :%s \"%s\" " (car v) (cdr v))))
+                                             (cadr dep)
+                                             ""))
+                                  (format "%s {:mvn/version \"%s\"}" (car dep) (cadr dep)))))))
          (middleware (mapconcat
                       (apply-partially #'format "%s")
                       (cider-jack-in-normalized-nrepl-middlewares)
@@ -1197,6 +1239,7 @@ nil."
     (define-key map (kbd "j j") #'cider-jack-in-clj)
     (define-key map (kbd "j s") #'cider-jack-in-cljs)
     (define-key map (kbd "j m") #'cider-jack-in-clj&cljs)
+    (define-key map (kbd "j u") #'cider-jack-in-universal)
     (define-key map (kbd "C-j j") #'cider-jack-in-clj)
     (define-key map (kbd "C-j s") #'cider-jack-in-cljs)
     (define-key map (kbd "C-j m") #'cider-jack-in-clj&cljs)
@@ -1421,9 +1464,15 @@ non-nil, don't start if ClojureScript requirements are not met."
         (t params)))
 
 (defun cider--update-project-dir (params)
-  "Update :project-dir in PARAMS."
+  "Update :project-dir in PARAMS.
+
+Params is a plist with the following keys (non-exhaustive)
+
+ :edit-project-dir prompt (optional) ask user to confirm the project root
+ directory."
   (let* ((params (cider--update-do-prompt params))
-         (proj-dir (if (plist-get params :do-prompt)
+         (proj-dir (if (or (plist-get params :do-prompt)
+                           (plist-get params :edit-project-dir))
                        (read-directory-name "Project: "
                                             (clojure-project-dir (cider-current-dir)))
                      (plist-get params :project-dir)))
@@ -1488,41 +1537,52 @@ non-nil, don't start if ClojureScript requirements are not met."
     (format "-encodedCommand %s" (base64-encode-string utf-16le-command t))))
 
 (defun cider--update-jack-in-cmd (params)
-  "Update :jack-in-cmd key in PARAMS."
-  (let* ((params (cider--update-do-prompt params))
-         (project-dir (plist-get params :project-dir))
-         (project-type (cider-project-type project-dir))
-         (command (cider-jack-in-command project-type))
-         (command-resolved (cider-jack-in-resolve-command project-type))
-         (command-global-opts (cider-jack-in-global-options project-type))
-         (command-params (cider-jack-in-params project-type)))
-    (if command-resolved
-        (with-current-buffer (or (plist-get params :--context-buffer)
-                                 (current-buffer))
-          (let* ((command-params (if (plist-get params :do-prompt)
-                                     (read-string "nREPL server command: "
-                                                  command-params
-                                                  'cider--jack-in-nrepl-params-history)
-                                   command-params))
-                 (cmd-params (if cider-inject-dependencies-at-jack-in
-                                 (cider-inject-jack-in-dependencies command-global-opts command-params project-type)
-                               command-params)))
-            (if (or project-dir cider-allow-jack-in-without-project)
-                (when (or project-dir
-                          (eq cider-allow-jack-in-without-project t)
-                          (and (null project-dir)
-                               (eq cider-allow-jack-in-without-project 'warn)
-                               (y-or-n-p "Are you sure you want to run `cider-jack-in' without a Clojure project? ")))
-                  (let ((cmd (format "%s %s" command-resolved (if (or (string-equal command "powershell")
-                                                                      (string-equal command "pwsh"))
-                                                                  (cider--powershell-encode-command cmd-params)
-                                                                cmd-params))))
-                    (plist-put params :jack-in-cmd (if (or cider-edit-jack-in-command
-                                                           (plist-get params :edit-jack-in-command))
-                                                       (read-string "jack-in command: " cmd 'cider--jack-in-cmd-history)
-                                                     cmd))))
-              (user-error "`cider-jack-in' is not allowed without a Clojure project"))))
-      (user-error "The %s executable isn't on your `exec-path'" command))))
+  "Update :jack-in-cmd key in PARAMS.
+
+PARAMS is a plist with the following keys (non-exhaustive list)
+
+:project-type optional, the project type to create the command for; see
+`cider-jack-in-command' for the list of valid types)."
+  (cond
+   ((plist-get params :jack-in-cmd) params)
+   (cider-jack-in-cmd (plist-put params :jack-in-cmd cider-jack-in-cmd))
+   (t (let* ((params (cider--update-do-prompt params))
+             (project-dir (plist-get params :project-dir))
+             (params-project-type (plist-get params :project-type))
+             (project-type (or params-project-type
+                               (cider-project-type project-dir)))
+             (command (cider-jack-in-command project-type))
+             (command-resolved (cider-jack-in-resolve-command project-type))
+             (command-global-opts (cider-jack-in-global-options project-type))
+             (command-params (cider-jack-in-params project-type)))
+        (if command-resolved
+            (with-current-buffer (or (plist-get params :--context-buffer)
+                                     (current-buffer))
+              (let* ((command-params (if (plist-get params :do-prompt)
+                                         (read-string "nREPL server command: "
+                                                      command-params
+                                                      'cider--jack-in-nrepl-params-history)
+                                       command-params))
+                     (cmd-params (if cider-inject-dependencies-at-jack-in
+                                     (cider-inject-jack-in-dependencies command-global-opts command-params project-type)
+                                   command-params)))
+                (if (or project-dir cider-allow-jack-in-without-project)
+                    (when (or project-dir
+                              (eq cider-allow-jack-in-without-project t)
+                              (and (null project-dir)
+                                   (eq cider-allow-jack-in-without-project 'warn)
+                                   (or params-project-type
+                                       (y-or-n-p "Are you sure you want to run `cider-jack-in' without a Clojure project? "))))
+                      (let ((cmd (format "%s %s" command-resolved (if (or (string-equal command "powershell")
+                                                                          (string-equal command "pwsh"))
+                                                                      (cider--powershell-encode-command cmd-params)
+                                                                    cmd-params))))
+                        (plist-put params :jack-in-cmd (if (or cider-edit-jack-in-command
+                                                               (plist-get params :edit-jack-in-command))
+                                                           (read-string "jack-in command: " cmd 'cider--jack-in-cmd-history)
+                                                         cmd))))
+                  (user-error "`cider-jack-in' is not allowed without a Clojure project"))))
+          (user-error "The %s executable isn't on your `exec-path'" command))))))
 
 (defun cider--update-host-port (params)
   "Update :host and :port; or :socket-file in PARAMS."
@@ -1795,6 +1855,55 @@ PROJECT-DIR defaults to the current project."
           ;; `cider-jack-in-default' used to be a string prior to CIDER
           ;; 0.18, therefore the need for `cider-maybe-intern'
           (t (cider-maybe-intern cider-jack-in-default)))))
+
+;;;###autoload
+(defun cider-jack-in-universal (arg)
+  "Start and connect to an nREPL server for the current project or ARG project id.
+
+If a project is found in current dir, call `cider-jack-in' passing ARG as
+first parameter, of which see.  Otherwise, ask user which project type to
+start an nREPL server and connect to without a project.
+
+But if invoked with a numeric prefix ARG, then start an nREPL server for
+the project type denoted by ARG number and connect to it, even if there is
+no project for it in the current dir.
+
+The supported project tools and their assigned numeric prefix ids are
+sourced from `cider-jack-in-universal-options', of which see.
+
+You can pass a numeric prefix argument n with `M-n` or `C-u n`.
+
+For example, to jack in to leiningen which is assigned to prefix arg 2 type
+
+M-2 \\[cider-jack-in-universal]."
+  (interactive "P")
+  (let ((cpt (clojure-project-dir (cider-current-dir))))
+    (if (or (integerp arg) (null cpt))
+        (let* ((project-types-available (mapcar #'car cider-jack-in-universal-options))
+               (project-type (if (null arg)
+                                 (intern (completing-read
+                                          "No project found in current dir, select project type to jack in: "
+                                          project-types-available
+                                          nil t))
+
+                               (or (seq-some (lambda (elt)
+                                               (cl-destructuring-bind
+                                                   (project-type (&key prefix-arg &allow-other-keys)) elt
+                                                 (when (= arg prefix-arg)
+                                                   project-type)))
+                                             cider-jack-in-universal-options)
+                                   (error ":cider-jack-in-universal :unsupported-prefix-argument %S :no-such-project"
+                                          arg))))
+               (project-options (cadr (seq-find (lambda (elt) (equal project-type (car elt)))
+                                                cider-jack-in-universal-options)))
+               (jack-in-opts (plist-get project-options :cmd))
+               (jack-in-type (plist-get jack-in-opts :jack-in-type)))
+          (pcase jack-in-type
+            ('clj (cider-jack-in-clj jack-in-opts))
+            ('cljs (cider-jack-in-cljs jack-in-opts))
+            (_ (error ":cider-jack-in-universal :jack-in-type-unsupported %S" jack-in-type))))
+
+      (cider-jack-in-clj arg))))
 
 
 ;; TODO: Implement a check for command presence over tramp

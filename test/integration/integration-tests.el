@@ -101,62 +101,81 @@
         ;; Create a project in temp dir
         (let* ((project-dir temp-dir)
                (deps-edn (expand-file-name "deps.edn" project-dir)))
-          (write-region "{}" nil deps-edn)
+          (write-region "{:deps {ikappaki/nrepl-mdlw-log {:git/sha \"d00fecf9f299ffde90b413751f28c1d2e7b56d17\"
+                                                          :git/url \"https://github.com/ikappaki/nrepl-mdlw-log.git\"}}}"
+                        nil deps-edn)
 
           (let (;; some times responses on GH CI slow runners might take more
                 ;; than the default timeout period to complete.
-                (nrepl-sync-request-timeout (+ nrepl-sync-request-timeout 10)))
+                (nrepl-sync-request-timeout 30)
+
+                (cider-jack-in-nrepl-middlewares
+                 (append '("ikappaki.nrepl-mdlw-log/middleware") cider-jack-in-nrepl-middlewares)))
 
             (with-temp-buffer
               ;; set default directory to temp project
               (setq-local default-directory project-dir)
 
-              (let* (;; Get a gv reference so as to poll if the client has
-                     ;; connected to the nREPL server.
-                     (client-is-connected* (cider-itu-nrepl-client-connected-ref-make!))
+              (unwind-protect ;; clojure-emacs/cider#3298
 
-                     ;; jack in and get repl buffer
-                     (nrepl-proc (cider-jack-in-clj `()))
-                     (nrepl-buf (process-buffer nrepl-proc)))
+                  (let* (;; Get a gv reference so as to poll if the client has
+                         ;; connected to the nREPL server.
+                         (client-is-connected* (cider-itu-nrepl-client-connected-ref-make!))
 
-                ;; wait until the client has successfully connected to the
-                ;; nREPL server. High duration since on windows it takes a
-                ;; long time to startup
-                (cider-itu-poll-until (eq (gv-deref client-is-connected*) 'connected) 90)
+                         ;; jack in and get repl buffer
+                         (nrepl-proc (cider-jack-in-clj `()))
+                         (nrepl-buf (process-buffer nrepl-proc)))
 
-                ;; give it some time to setup the clj REPL
-                (cider-itu-poll-until (cider-repls 'clj nil) 90)
+                    ;; wait until the client has successfully connected to the
+                    ;; nREPL server. High duration since on windows it takes a
+                    ;; long time to startup
+                    (cider-itu-poll-until (eq (gv-deref client-is-connected*) 'connected) 90)
 
-                ;; send command to the REPL, and push stdout/stderr to
-                ;; corresponding eval-xxx variables.
-                (let ((repl-buffer (cider-current-repl))
-                      (eval-err '())
-                      (eval-out '()))
-                  (expect repl-buffer :not :to-be nil)
+                    ;; give it some time to setup the clj REPL
+                    (cider-itu-poll-until (cider-repls 'clj nil) 90)
 
-                  ;; send command to the REPL
-                  (cider-interactive-eval
-                   ;; ask REPL to return a string that uniquely identifies it.
-                   "(print :clojure? (some? (clojure-version)))"
-                   (lambda (return)
-                     (nrepl-dbind-response
-                         return
-                         (out err)
-                       (when err (push err eval-err))
-                       (when out (push out eval-out)))) )
+                    ;; send command to the REPL, and push stdout/stderr to
+                    ;; corresponding eval-xxx variables.
+                    (let ((repl-buffer (cider-current-repl))
+                          (eval-err '())
+                          (eval-out '()))
+                      (expect repl-buffer :not :to-be nil)
 
-                  ;; wait for a response to come back.
-                  (cider-itu-poll-until (or eval-err eval-out) 10)
+                      ;; send command to the REPL
+                      (cider-interactive-eval
+                       ;; ask REPL to return a string that uniquely identifies it.
+                       "(print :clojure? (some? (clojure-version)))"
+                       (lambda (return)
+                         (nrepl-dbind-response
+                             return
+                             (out err)
+                           (when err (push err eval-err))
+                           (when out (push out eval-out)))) )
 
-                  ;; ensure there are no errors and response is as expected.
-                  (expect eval-err :to-equal '())
-                  (expect eval-out :to-equal '(":clojure? true"))
+                      ;; wait for a response to come back.
+                      (cider-itu-poll-until (or eval-err eval-out) 10)
 
-                  ;; exit the REPL.
-                  (cider-quit repl-buffer)
-                  ;; wait for the REPL to exit
-                  (cider-itu-poll-until (not (eq (process-status nrepl-proc) 'run)) 15)
-                  (expect (member (process-status nrepl-proc) '(exit signal)))))))))))
+                      ;; ensure there are no errors and response is as expected.
+                      (expect eval-err :to-equal '())
+                      (expect eval-out :to-equal '(":clojure? true"))
+
+                      ;; exit the REPL.
+                      (cider-quit repl-buffer)
+                      ;; wait for the REPL to exit
+                      (cider-itu-poll-until (not (eq (process-status nrepl-proc) 'run)) 15)
+                      (expect (member (process-status nrepl-proc) '(exit signal)))
+                      ))
+
+                ;; as part of investigating clojure-emacs/cider#3298, whereby a
+                ;; timeout might occur intermittedly on eval while assessing the
+                ;; nREPL's capabilities, we dump out the log file generated by
+                ;; the `ikappaki/nrepl-mdlw-log.log` middleware setup on the
+                ;; server earlier.
+                (if (file-exists-p "nrepl-mdlw-log.log")
+                    (with-temp-buffer
+                      (insert-file-contents "nrepl-mdlw-log.log")
+                      (message ":ikappaki/nrepl-mdlw-log-dump\n%s\n" (buffer-string)))
+                  (message ":!nrepl-mdlw-log-found")))))))))
 
   (it "to leiningen"
     (with-cider-test-sandbox
@@ -244,7 +263,7 @@
               (cider-itu-poll-until (eq (gv-deref client-is-connected*) 'connected) 5)
 
               ;; give it some time to setup the clj REPL
-              (cider-itu-poll-until (cider-repls 'clj nil) 5)
+              (cider-itu-poll-until (cider-repls 'cljs nil) 5)
 
               ;; send command to the REPL, and push stdout/stderr to
               ;; corresponding eval-xxx variables.
@@ -287,8 +306,13 @@
         ;; Create a project in temp dir
         (let* ((project-dir temp-dir)
                (shadow-cljs-edn (expand-file-name "shadow-cljs.edn" project-dir))
+               (deps-edn (expand-file-name "deps.edn" project-dir))
                (package-json    (expand-file-name "package.json"    project-dir)))
-          (write-region "{}" nil shadow-cljs-edn)
+          (write-region "{:deps true, :nrepl {:middleware [ikappaki.nrepl-mdlw-log/middleware]}}" nil shadow-cljs-edn)
+          (write-region "{:deps {ikappaki/nrepl-mdlw-log {:git/sha \"d00fecf9f299ffde90b413751f28c1d2e7b56d17\"
+                                                          :git/url \"https://github.com/ikappaki/nrepl-mdlw-log.git\"}
+                                 thheller/shadow-cljs {:mvn/version \"2.20.13\"}}}"
+                        nil deps-edn)
           (write-region "{\"dependencies\":{\"shadow-cljs\": \"^2.20.13\"}}" nil package-json)
           (let ((default-directory project-dir))
             (message ":npm-install...")
@@ -297,7 +321,12 @@
 
           (let (;; some times responses on GH CI slow runners might take more than the default
                 ;; timeout period to complete
-                (nrepl-sync-request-timeout (+ nrepl-sync-request-timeout 10))
+                (nrepl-sync-request-timeout 30)
+
+                (cider-jack-in-cljs-nrepl-middlewares
+                 (append '("ikappaki.nrepl-mdlw-log/middleware") cider-jack-in-cljs-nrepl-middlewares))
+                (cider-preferred-build-tool 'shadow-cljs)
+
                 ;; request for a node repl, so that shadow forks one.
                 (cider-shadow-default-options ":node-repl"))
 
@@ -305,53 +334,208 @@
               ;; set default directory to temp project
               (setq-local default-directory project-dir)
 
-              (let* (;; Get a gv reference so as to poll if the client has
-                     ;; connected to the nREPL server.
-                     (client-is-connected* (cider-itu-nrepl-client-connected-ref-make!))
+              (unwind-protect ;; clojure-emacs/cider#3298
 
-                     ;; jack in and get repl buffer
-                     (nrepl-proc (cider-jack-in-cljs '(:cljs-repl-type shadow)))
-                     (nrepl-buf (process-buffer nrepl-proc)))
+               (let* (;; Get a gv reference so as to poll if the client has
+                      ;; connected to the nREPL server.
+                      (client-is-connected* (cider-itu-nrepl-client-connected-ref-make!))
 
-                ;; wait until the client has successfully connected to the
-                ;; nREPL server.
-                (cider-itu-poll-until (eq (gv-deref client-is-connected*) 'connected) 120)
+                      ;; jack in and get repl buffer
+                      (nrepl-proc (cider-jack-in-cljs '(:cljs-repl-type shadow)))
+                      (nrepl-buf (process-buffer nrepl-proc)))
 
-                ;; give it some to switch from shadow clj to cljs REPL.
-                (cider-itu-poll-until (cider-repls 'cljs nil) 120)
+                 ;; wait until the client has successfully connected to the
+                 ;; nREPL server.
+                 (cider-itu-poll-until (eq (gv-deref client-is-connected*) 'connected) 120)
 
-                ;; send command to the REPL, and push stdout/stderr to
-                ;; corresponding eval-xxx variables.
-                (let ((repl-buffer (cider-current-repl))
-                      (eval-err '())
-                      (eval-out '()))
-                  (expect repl-buffer :not :to-be nil)
-                  (sleep-for 2)
+                 ;; give it some to switch from shadow clj to cljs REPL.
+                 (cider-itu-poll-until (cider-repls 'cljs nil) 120)
 
-                  ;; send command to the REPL
-                  (cider-interactive-eval
-                   ;; ask REPL to return a string that uniquely identifies it.
-                   "(print :cljs? (some? *clojurescript-version*))"
-                   (lambda (return)
-                     (nrepl-dbind-response
-                         return
-                         (out err)
-                       (when err (push err eval-err))
-                       (when out (push out eval-out)))) )
+                 ;; send command to the REPL, and push stdout/stderr to
+                 ;; corresponding eval-xxx variables.
+                 (let ((repl-buffer (cider-current-repl))
+                       (eval-err '())
+                       (eval-out '()))
+                   (expect repl-buffer :not :to-be nil)
+                   (sleep-for 2)
 
-                  ;; wait for a response to come back.
-                  (cider-itu-poll-until (or eval-err eval-out) 10)
+                   ;; send command to the REPL
+                   (cider-interactive-eval
+                    ;; ask REPL to return a string that uniquely identifies it.
+                    "(print :cljs? (some? *clojurescript-version*))"
+                    (lambda (return)
+                      (nrepl-dbind-response
+                          return
+                          (out err)
+                        (when err (push err eval-err))
+                        (when out (push out eval-out)))) )
 
-                  ;; ensure there are no errors and response is as expected.
-                  (expect eval-err :to-equal '())
-                  (expect eval-out :to-equal '(":cljs? true\n"))
+                   ;; wait for a response to come back.
+                   (cider-itu-poll-until (or eval-err eval-out) 10)
 
-                  ;; exit the REPL.
-                  (cider-quit repl-buffer)
+                   ;; ensure there are no errors and response is as expected.
+                   (expect eval-err :to-equal '())
+                   (expect eval-out :to-equal '(":cljs? true\n"))
 
-                  ;; wait for the REPL to exit
-                  (cider-itu-poll-until (not (eq (process-status nrepl-proc) 'run)) 15)
-                  (expect (member (process-status nrepl-proc) '(exit signal))))))))))))
+                   ;; exit the REPL.
+                   (cider-quit repl-buffer)
+
+                   ;; wait for the REPL to exit
+                   (cider-itu-poll-until (not (eq (process-status nrepl-proc) 'run)) 15)
+                   (expect (member (process-status nrepl-proc) '(exit signal)))))
+
+               ;; as part of investigating clojure-emacs/cider#3298, whereby a
+               ;; timeout might occur intermittedly on eval while assessing the
+               ;; nREPL's capabilities, we dump out the log file generated by
+               ;; the `ikappaki/nrepl-mdlw-log.log` middleware setup on the
+               ;; server earlier.
+               (if (file-exists-p "nrepl-mdlw-log.log")
+                   (with-temp-buffer
+                     (insert-file-contents "nrepl-mdlw-log.log")
+                     (message ":ikappaki/nrepl-mdlw-log-dump\n%s\n" (buffer-string)))
+                 (message ":!nrepl-mdlw-log-found")))))))))
+
+  ;; jacking in without a current project
+  ;;
+  (it "no project, user choice to nbb"
+    (with-cider-test-sandbox
+      (with-temp-dir temp-dir
+        ;; setup empty project dir
+        (let* ((project-dir temp-dir))
+          ;; fake user input
+          (spy-on 'completing-read
+                  :and-call-fake (lambda (prompt _collection &optional _predicate _require-match
+                                                 initial-input _hist _def _inherit-input-method)
+                                   (pcase prompt
+                                     ;; select nbb
+                                     ("No project found in current dir, select project type to jack in: "
+                                      "nbb")
+                                     (_ (error ":integration-test-unsupported-prompt-error %S" prompt)))))
+          (spy-on 'read-file-name
+                  :and-call-fake (lambda (prompt &optional dir _default-filename _mustmatch
+                                                 _initial _predicate)
+                                   (pcase prompt
+                                     ;; project src directory
+                                     ("Project: " dir)
+                                     (_ (error ":integration-test-unsupported-prompt-error %S" prompt)))))
+
+          (with-temp-buffer
+            ;; set default directory to temp project
+            (setq-local default-directory project-dir)
+
+            (let* (;; Get a gv reference so as to poll if the client has
+                   ;; connected to the nREPL server.
+                   (client-is-connected* (cider-itu-nrepl-client-connected-ref-make!))
+
+                   ;; jack in and get repl buffer
+                   (nrepl-proc (cider-jack-in-universal '()))
+                   (nrepl-buf (process-buffer nrepl-proc)))
+
+              ;; wait until the client has successfully connected to the
+              ;; nREPL server.
+              (cider-itu-poll-until (eq (gv-deref client-is-connected*) 'connected) 5)
+
+              ;; give it some time to setup the clj REPL
+              (cider-itu-poll-until (cider-repls 'cljs nil) 5)
+
+              ;; send command to the REPL, and push stdout/stderr to
+              ;; corresponding eval-xxx variables.
+              (let ((repl-buffer (cider-current-repl))
+                    (eval-err '())
+                    (eval-out '()))
+                (expect repl-buffer :not :to-be nil)
+
+                ;; send command to the REPL
+                (cider-interactive-eval
+                 ;; ask REPL to return a string that uniquely identifies it.
+                 "(print :nbb? (some? (nbb.core/version)))"
+                 (lambda (return)
+                   (nrepl-dbind-response
+                       return
+                       (out err)
+                     (when err (push err eval-err))
+                     (when out (push out eval-out)))) )
+
+                ;; wait for a response to come back.
+                (cider-itu-poll-until (or eval-err eval-out) 5)
+
+                ;; ensure there are no errors and response is as expected.
+                (expect eval-err :to-equal '())
+                (expect eval-out :to-equal '(":nbb? true"))
+
+                ;; exit the REPL.
+                (cider-quit repl-buffer)
+
+                ;; wait for the REPL to exit
+                (cider-itu-poll-until (not (eq (process-status nrepl-proc) 'run)) 5)
+                (expect (member (process-status nrepl-proc) '(exit signal))))))))))
+
+  (it "no project, numeric prefix argument, to leiningen"
+    (with-cider-test-sandbox
+      (with-temp-dir temp-dir
+        ;; setup empty dir
+        (let* ((project-dir temp-dir))
+          ;; fake user input
+          (spy-on 'read-file-name
+                  :and-call-fake (lambda (prompt &optional dir _default-filename _mustmatch
+                                                 _initial _predicate)
+                                   (pcase prompt
+                                     ;; project src directory
+                                     ("Project: " dir)
+                                     (_ (error ":integration-test-unsupported-prompt-error %S" prompt)))))
+          (with-temp-buffer
+            ;; set default directory to temp project
+            (setq-local default-directory project-dir)
+
+            (let* (;; Get a gv reference so as to poll if the client has
+                   ;; connected to the nREPL server.
+                   (client-is-connected* (cider-itu-nrepl-client-connected-ref-make!))
+
+                   ;; jack in and get repl buffer.
+                   ;;
+                   ;; The numerical prefix arg for `lein` in
+                   ;; `cider-jack-in-universal-options' is 2.
+                   (nrepl-proc (cider-jack-in-universal 2))
+                   (nrepl-buf (process-buffer nrepl-proc)))
+
+              ;; wait until the client has successfully connected to the
+              ;; nREPL server.
+              (cider-itu-poll-until (eq (gv-deref client-is-connected*) 'connected) 90)
+
+              ;; give it some time to setup the clj REPL
+              (cider-itu-poll-until (cider-repls 'clj nil) 90)
+
+              ;; send command to the REPL, and push stdout/stderr to
+              ;; corresponding eval-xxx variables.
+              (let ((repl-buffer (cider-current-repl))
+                    (eval-err '())
+                    (eval-out '()))
+                (expect repl-buffer :not :to-be nil)
+
+                ;; send command to the REPL
+                (cider-interactive-eval
+                 ;; ask REPL to return a string that uniquely identifies it.
+                 "(print :clojure? (some? (clojure-version)))"
+                 (lambda (return)
+                   (nrepl-dbind-response
+                       return
+                       (out err)
+                     (when err (push err eval-err))
+                     (when out (push out eval-out)))) )
+
+                ;; wait for a response to come back.
+                (cider-itu-poll-until (or eval-err eval-out) 10)
+
+                ;; ensure there are no errors and response is as expected.
+                (expect eval-err :to-equal '())
+                (expect eval-out :to-equal '(":clojure? true"))
+
+                ;; exit the REPL.
+                (cider-quit repl-buffer)
+
+                ;; wait for the REPL to exit
+                (cider-itu-poll-until (not (eq (process-status nrepl-proc) 'run)) 15)
+                (expect (member (process-status nrepl-proc) '(exit signal)))))))))))
 
 (provide 'integration-tests)
 
